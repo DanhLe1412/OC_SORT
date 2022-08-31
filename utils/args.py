@@ -42,6 +42,7 @@ def make_parser():
     parser.add_argument("--seed", default=None, type=int, help="eval seed")
 
     # tracking args
+    parser.add_argument("--yolov5", type=int, default=1, help="use yolov5 for detection")
     parser.add_argument("--track_thresh", type=float, default=0.6, help="detection confidence threshold")
     parser.add_argument("--iou_thresh", type=float, default=0.3, help="the iou threshold in Sort for matching")
     parser.add_argument("--min_hits", type=int, default=3, help="min hits to create track in SORT")
