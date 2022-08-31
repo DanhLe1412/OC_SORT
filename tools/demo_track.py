@@ -1,9 +1,11 @@
 import argparse
 import os
 import os.path as osp
+from pickletools import uint8
 import time
 import cv2
 import torch
+import numpy as np
 
 from loguru import logger
 
@@ -14,7 +16,14 @@ from yolox.utils.visualize import plot_tracking
 from trackers.ocsort_tracker.ocsort import OCSort
 from trackers.tracking_utils.timer import Timer
 
+from yolov5.models.common import DetectMultiBackend
+from yolov5.utils.dataloaders import VID_FORMATS, LoadImages, LoadStreams
+from yolov5.utils.general import (LOGGER, check_img_size, non_max_suppression, scale_coords, check_requirements, cv2,
+                                  check_imshow, xyxy2xywh, increment_path, strip_optimizer, colorstr, print_args, check_file)
+from yolov5.utils.torch_utils import select_device, time_sync
+from yolov5.utils.plots import Annotator, colors, save_one_box
 
+import yolov5
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
 from utils.args import make_parser
@@ -89,6 +98,44 @@ class Predictor(object):
             )
         return outputs, img_info
 
+class PredictorYoloV5(object):
+    def __init__(self, model_path, exp, args):
+        self.model_path = model_path
+        self.model = DetectMultiBackend(model_path, device=args.device, data=None)
+        self.conf = exp.test_conf # NMS confidence threshold
+        self.test_size = exp.test_size
+        self.rgb_means = (0.485, 0.456, 0.406)
+        self.std = (0.229, 0.224, 0.225)
+        
+
+    def inference(self, img, timer):
+        img_info = {"id": 0}
+        if isinstance(img, str):
+            img_info["file_name"] = osp.basename(img)
+            img = cv2.imread(img)
+        else:
+            img_info["file_name"] = None
+        img, ratio = preproc(img, self.test_size, self.rgb_means, self.std)
+        height, width = img.shape[:2]
+        img_info["height"] = height
+        img_info["width"] = width
+        img_info["raw_img"] = img
+        img_info["ratio"] = ratio
+        # img, ratio = preprocess_v5(img, self.test_size, self.rgb_means, self.std)
+        self.model.conf = self.conf
+        timer.tic()
+        # tmp = img[None,:,:,:]
+        tmp = np.expand_dims(img, 0)
+        results = self.model(tmp)
+        predictions = results.pred[0]
+        if len(predictions)==0:
+            return [None], img_info
+        else:
+            boxes = predictions[:, :4].tolist()
+            boxes_int = torch.tensor([[int(v) for v in box] for box in boxes])
+            scores = torch.tensor(predictions[:,4].tolist())
+            outputs = [torch.cat((boxes_int, torch.unsqueeze(scores, dim=1)), 1)]
+        return outputs, img_info
 
 def image_demo(predictor, vis_folder, current_time, args):
     if osp.isdir(args.path):
@@ -230,44 +277,46 @@ def main(exp, args):
     if args.nms is not None:
         exp.nmsthre = args.nms
     if args.tsize is not None:
-        exp.test_size = (args.tsize, args.tsize)
+        exp.test_size = (args.tsize, args.tsize)    
 
     model = exp.get_model().to(args.device)
     logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
     model.eval()
+    if args.yolov5 == 0:
+        if not args.trt:
+            if args.ckpt is None:
+                ckpt_file = osp.join(output_dir, "best_ckpt.pth.tar")
+            else:
+                ckpt_file = args.ckpt
+            logger.info("loading checkpoint")
+            ckpt = torch.load(ckpt_file, map_location=args.device)
+            # load the model state dict
+            model.load_state_dict(ckpt["model"])
+            logger.info("loaded checkpoint done.")
 
-    if not args.trt:
-        if args.ckpt is None:
-            ckpt_file = osp.join(output_dir, "best_ckpt.pth.tar")
+        if args.fuse:
+            logger.info("\tFusing model...")
+            model = fuse_model(model)
+
+        if args.fp16:
+            model = model.half()  # to FP16
+
+        if args.trt:
+            assert not args.fuse, "TensorRT model is not support model fusing!"
+            trt_file = osp.join(output_dir, "model_trt.pth")
+            assert osp.exists(
+                trt_file
+            ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
+            model.head.decode_in_inference = False
+            decoder = model.head.decode_outputs
+            logger.info("Using TensorRT to inference")
         else:
-            ckpt_file = args.ckpt
-        logger.info("loading checkpoint")
-        ckpt = torch.load(ckpt_file, map_location="cpu")
-        # load the model state dict
-        model.load_state_dict(ckpt["model"])
-        logger.info("loaded checkpoint done.")
-
-    if args.fuse:
-        logger.info("\tFusing model...")
-        model = fuse_model(model)
-
-    if args.fp16:
-        model = model.half()  # to FP16
-
-    if args.trt:
-        assert not args.fuse, "TensorRT model is not support model fusing!"
-        trt_file = osp.join(output_dir, "model_trt.pth")
-        assert osp.exists(
-            trt_file
-        ), "TensorRT model is not found!\n Run python3 tools/trt.py first!"
-        model.head.decode_in_inference = False
-        decoder = model.head.decode_outputs
-        logger.info("Using TensorRT to inference")
+            trt_file = None
+            decoder = None
+        
+            predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
     else:
-        trt_file = None
-        decoder = None
-
-    predictor = Predictor(model, exp, trt_file, decoder, args.device, args.fp16)
+        predictor = PredictorYoloV5(args.ckpt, exp, args)
     current_time = time.localtime()
     if args.demo_type == "image":
         image_demo(predictor, vis_folder, current_time, args)
@@ -279,3 +328,4 @@ if __name__ == "__main__":
     args = make_parser().parse_args()
     exp = get_exp(args.exp_file, args.name)
     main(exp, args)
+
