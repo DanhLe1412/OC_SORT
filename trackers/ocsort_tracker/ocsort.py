@@ -4,6 +4,7 @@
 from __future__ import print_function
 
 import numpy as np
+import torch
 from .association import *
 
 
@@ -17,6 +18,17 @@ def k_previous_obs(observations, cur_age, k):
     max_age = max(observations.keys())
     return observations[max_age]
 
+def xywh2xywhz(depth, bboxes):
+    new = None
+    for i in range(0, len(bboxes)):
+      box = bboxes[i]
+      mean = depth[int(box[0]) : int(box[2]), int(box[1]) : int(box[3])].mean()
+      mean = torch.tensor([mean]).float()
+      
+      box = torch.cat((box, mean), 0)
+      box = torch.unsqueeze(box, 0)
+      new = box if new == None else torch.cat((new, box), 0)
+    return new
 
 def convert_bbox_to_z(bbox):
     """
@@ -30,7 +42,8 @@ def convert_bbox_to_z(bbox):
     y = bbox[1] + h/2.
     s = w * h  # scale is just area
     r = w / float(h+1e-6)
-    return np.array([x, y, s, r]).reshape((4, 1))
+    z = bbox[4]
+    return np.array([x, y, s, r, z]).reshape((5, 1))
 
 
 def convert_x_to_bbox(x, score=None):
@@ -189,7 +202,7 @@ class OCSort(object):
         self.use_byte = use_byte
         KalmanBoxTracker.count = 0
 
-    def update(self, output_results, img_info, img_size):
+    def update(self, output_results, depth, img_info, img_size):
         """
         Params:
           dets - a numpy array of detections in the format [[x1,y1,x2,y2,score],[x1,y1,x2,y2,score],...]
@@ -205,10 +218,12 @@ class OCSort(object):
         if output_results.shape[1] == 5:
             scores = output_results[:, 4]
             bboxes = output_results[:, :4]
+            bboxes = xywh2xywhz(depth, bboxes)
         else:
             output_results = output_results.cpu().numpy()
             scores = output_results[:, 4] * output_results[:, 5]
             bboxes = output_results[:, :4]  # x1y1x2y2
+            bboxes = xywh2xywhz(depth, bboxes)
         img_h, img_w = img_info[0], img_info[1]
         scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
         bboxes /= scale

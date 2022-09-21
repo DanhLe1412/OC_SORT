@@ -169,10 +169,17 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
         if frame_id % 20 == 0:
             logger.info('Processing frame {} ({:.2f} fps)'.format(frame_id, 1. / max(1e-5, timer.average_time)))
         ret_val, frame = cap.read()
+
+        depthname = str(frame_id + 1) + '.pfm'
+        for i in range(len(depthname), 12):
+          depthname = '0' + depthname
+        depth = cv2.imread(args.depth_path + depthname, cv2.IMREAD_UNCHANGED)
+        depth = cv2.transpose(depth)
+
         if ret_val:
             outputs, img_info = predictor.inference(frame, timer)
             if outputs[0] is not None:
-                online_targets = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size)
+                online_targets = tracker.update(outputs[0], depth, [img_info['height'], img_info['width']], exp.test_size)
                 online_tlwhs = []
                 online_ids = []
                 for t in online_targets:
